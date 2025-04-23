@@ -1065,6 +1065,8 @@ class InputUI:
         return object_list
 
     def _render_property(self, streamlit_app: Any, key: str, property: Dict) -> Any:
+        # filter the case of optional and nullable
+        property = schema_utils.filter_nullable(property)
         if schema_utils.is_single_enum_property(property, self._schema_references):
             return self._render_single_enum_input(streamlit_app, key, property)
 
