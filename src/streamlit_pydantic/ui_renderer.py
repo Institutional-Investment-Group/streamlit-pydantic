@@ -1251,6 +1251,7 @@ class OutputUI:
                     continue
 
                 if property_schema:
+                    property_schema = schema_utils.filter_nullable(property_schema)
                     if schema_utils.is_multi_file_property(property_schema):
                         for file in output_property_value:
                             self._render_single_file_property(
