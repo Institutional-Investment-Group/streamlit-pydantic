@@ -22,7 +22,9 @@ class ExampleModel(BaseModel):
     """A model to showcase & test different types of pydantic fields with default values."""
 
     long_text: str = Field(
-        "default string", format="multi-line", description="Unlimited text property"
+        "default string",
+        description="Unlimited text property",
+        json_schema_extra={"format": "multi-line"},
     )
     integer_in_range: int = Field(
         22,
@@ -32,23 +34,28 @@ class ExampleModel(BaseModel):
         description="Number property with a limited range",
     )
     single_selection: SelectionValue = Field(
-        "bar", description="Only select a single item from a set."
+        SelectionValue.BAR,
+        description="Only select a single item from a set."
     )
     multi_selection: Set[SelectionValue] = Field(
-        "bar", description="Allows multiple items from a set."
+        default_factory=lambda: {SelectionValue.BAR},
+        description="Allows multiple items from a set."
     )
     read_only_text: str = Field(
         "Lorem ipsum dolor sit amet",
         description="This is ready only text.",
-        readOnly=True,
+        json_schema_extra={"readOnly": True},
     )
-    default_color: Color = Field("yellow", description="A defaulted color")
+    default_color: Color = Field(
+        default_factory=lambda: Color("yellow"),
+        description="A defaulted color"
+    )
     default_object: OtherData = Field(
         OtherData(),
         description="An object embedded into the model with a default",
     )
     overriden_default_object: OtherData = Field(
-        OtherData(text="overridden object text", integer="12"),
+        OtherData(text="overridden object text", integer=12),
         description="Default object overrides the embedded object defaults",
     )
     default_dict: Dict[str, str] = {"foo": "bar"}

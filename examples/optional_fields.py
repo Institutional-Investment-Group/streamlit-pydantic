@@ -11,7 +11,7 @@ class ExampleModel(BaseModel):
     some_number: int
     some_boolean: bool
     optional_boolean: bool = False
-    optional_text: str = None
+    optional_text: Optional[str] = None
     optional_number: int = Field(20)
 
 

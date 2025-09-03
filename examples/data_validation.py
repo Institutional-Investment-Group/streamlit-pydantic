@@ -7,7 +7,7 @@ import streamlit_pydantic as sp
 
 class ExampleModel(BaseModel):
     url: HttpUrl
-    color: Color = Field("blue", format="text")
+    color: Color = Field(Color("blue"), json_schema_extra={"format": "text"})
     email: EmailStr
 
 

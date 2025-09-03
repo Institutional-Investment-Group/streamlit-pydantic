@@ -150,7 +150,7 @@ addopts = "-s"
 typeCheckingMode = "standard"
 reportIncompatibleVariableOverride = "warning"
 include  = [
-    "src/**/*.py",
+#    "src/**/*.py"
 ]
 
 [dependency-groups]

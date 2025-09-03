@@ -1,6 +1,6 @@
 import datetime
 from enum import Enum
-from typing import Dict, List, Literal, Set
+from typing import Dict, List, Literal, Optional, Set
 
 import streamlit as st
 from pydantic import Base64UrlBytes, BaseModel, Field, SecretStr
@@ -21,107 +21,133 @@ class OtherData(BaseModel):
 
 class DisabledModel(BaseModel):
     short_text: str = Field(
-        ..., readOnly=True, max_length=60, description="Short text property"
+        ...,
+        description="Short text property",
+        json_schema_extra={"readOnly": True, "maxLength": 60},
     )
     password: SecretStr = Field(
-        ..., readOnly=True, description="Password text property"
+        ...,
+        description="Password text property",
+        json_schema_extra={"readOnly": True},
     )
     long_text: str = Field(
-        ..., format="multi-line", readOnly=True, description="Unlimited text property"
+        ...,
+        description="Unlimited text property",
+        json_schema_extra={"readOnly": True, "format": "multi-line"},
     )
     integer_in_range: int = Field(
         20,
         ge=10,
         le=30,
         multiple_of=2,
-        readOnly=True,
         description="Number property with a limited range. Optional because of default value.",
+        json_schema_extra={"readOnly": True},
     )
     positive_integer: int = Field(
         ...,
         ge=0,
         multiple_of=10,
-        readOnly=True,
         description="Positive integer with step count of 10.",
+        json_schema_extra={"readOnly": True},
     )
-    float_number: float = Field(0.001, readOnly=True)
+    float_number: float = Field(
+        0.001,
+        json_schema_extra={"readOnly": True},
+    )
     date: datetime.date = Field(
-        datetime.date.today(),
-        readOnly=True,
-        description="Date property. Optional because of default value.",
+        default_factory=datetime.date.today,
+        json_schema_extra={"readOnly": True},
     )
     time: datetime.time = Field(
-        datetime.datetime.now().time(),
-        readOnly=True,
+        default_factory=lambda: datetime.datetime.now().time(),
         description="Time property. Optional because of default value.",
+        json_schema_extra={"readOnly": True},
     )
     dt: datetime.datetime = Field(
-        datetime.datetime.now(),
-        readOnly=True,
+        default_factory=datetime.datetime.now,
         description="Datetime property. Optional because of default value.",
+        json_schema_extra={"readOnly": True},
     )
     boolean: bool = Field(
         False,
-        readOnly=True,
         description="Boolean property. Optional because of default value.",
+        json_schema_extra={"readOnly": True},
     )
     colour: Color = Field(
-        Color("Blue"),
-        readOnly=True,
+        default_factory=lambda: Color("Blue"),
         description="Color property. Optional because of default value.",
+        json_schema_extra={"readOnly": True},
     )
     read_only_text: str = Field(
         "Lorem ipsum dolor sit amet",
         description="This is a read only text.",
-        readOnly=True,
+        json_schema_extra={"readOnly": True},
     )
     file_list: List[Base64UrlBytes] = Field(
-        [],
-        readOnly=True,
+        default_factory=list,
         description="A list of files. Optional property.",
+        json_schema_extra={"readOnly": True},
     )
-    single_file: Base64UrlBytes = Field(
+    single_file: Optional[Base64UrlBytes] = Field(
         None,
-        readOnly=True,
         description="A single file. Optional property.",
+        json_schema_extra={"readOnly": True},
     )
     single_selection: SelectionValue = Field(
-        ..., readOnly=True, description="Only select a single item from a set."
+        ...,
+        description="Only select a single item from a set.",
+        json_schema_extra={"readOnly": True},
     )
     single_selection_with_literal: Literal["foo", "bar"] = Field(
-        "foo", readOnly=True, description="Only select a single item from a set."
+        "foo",
+        description="Only select a single item from a set.",
+        json_schema_extra={"readOnly": True},
     )
     multi_selection: Set[SelectionValue] = Field(
-        ..., readOnly=True, description="Allows multiple items from a set."
+        ...,
+        description="Allows multiple items from a set.",
+        json_schema_extra={"readOnly": True},
     )
     multi_selection_with_literal: Set[Literal["foo", "bar"]] = Field(
-        ["foo", "bar"], readOnly=True, description="Allows multiple items from a set."
+        default_factory=lambda: set(["foo", "bar"]),
+        description="Allows multiple items from a set.",
+        json_schema_extra={"readOnly": True},
     )
     single_object: OtherData = Field(
         ...,
-        readOnly=True,
         description="Another object embedded into this model.",
+        json_schema_extra={"readOnly": True},
     )
     string_list: List[str] = Field(
-        ..., max_items=20, readOnly=True, description="List of string values"
+        ...,
+        description="List of string values",
+        json_schema_extra={"readOnly": True, "maxItems": 20},
     )
-    int_list: List[int] = Field(..., readOnly=True, description="List of int values")
+    int_list: List[int] = Field(
+        ...,
+        description="List of int values",
+        json_schema_extra={"readOnly": True},
+    )
     string_dict: Dict[str, str] = Field(
-        ..., readOnly=True, description="Dict property with string values"
+        ...,
+        description="Dict property with string values",
+        json_schema_extra={"readOnly": True},
     )
     float_dict: Dict[str, float] = Field(
-        ..., readOnly=True, description="Dict property with float values"
+        ...,
+        description="Dict property with float values",
+        json_schema_extra={"readOnly": True},
     )
     object_list: List[OtherData] = Field(
         ...,
-        readOnly=True,
         description="A list of objects embedded into this model.",
+        json_schema_extra={"readOnly": True},
     )
 
 
 instance = DisabledModel(
     short_text="Some INSTANCE text",
-    password="$uper_$ecret!",
+    password=SecretStr("$uper_$ecret!"),
     long_text="This is some really long text from the INSTANCE",
     integer_in_range=28,
     positive_integer=20,
@@ -136,8 +162,8 @@ instance = DisabledModel(
     single_file=b"",
     single_selection=SelectionValue.FOO,
     single_selection_with_literal="bar",
-    multi_selection=[SelectionValue.FOO, SelectionValue.BAR],
-    multi_selection_with_literal=["foo", "bar"],
+    multi_selection={SelectionValue.FOO, SelectionValue.BAR},
+    multi_selection_with_literal=set(["foo", "bar"]),
     single_object=OtherData(text="nested data INSTANCE text", integer=66),
     string_list=["a", "ab", "abc"],
     int_list=[9, 99, 999],

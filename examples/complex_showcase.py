@@ -6,6 +6,7 @@ import streamlit as st
 from pydantic import Base64UrlBytes, BaseModel, Field, SecretStr
 
 import streamlit_pydantic as sp
+from streamlit_pydantic.ui_renderer import GroupOptionalFieldsStrategy
 
 
 class SelectionValue(str, Enum):
@@ -19,10 +20,16 @@ class OtherData(BaseModel):
 
 
 class ShowcaseModel(BaseModel):
-    short_text: str = Field(..., max_length=60, description="Short text property")
+    short_text: str = Field(
+        ...,
+        description="Short text property",
+        json_schema_extra={"maxLength": 60},
+    )
     password: SecretStr = Field(..., description="Password text property")
     long_text: str = Field(
-        ..., format="multi-line", description="Unlimited text property"
+        ...,
+        description="Unlimited text property",
+        json_schema_extra={"format": "multi-line"},
     )
     integer_in_range: int = Field(
         20,
@@ -49,8 +56,8 @@ class ShowcaseModel(BaseModel):
     )
     read_only_text: str = Field(
         "Lorem ipsum dolor sit amet",
-        description="This is a ready only text.",
-        readOnly=True,
+        description="This is a read only text.",
+        json_schema_extra={"readOnly": True},
     )
     file_list: List[Base64UrlBytes] = Field(
         [],
@@ -70,14 +77,14 @@ class ShowcaseModel(BaseModel):
         ..., description="Allows multiple items from a set."
     )
     multi_selection_with_literal: Set[Literal["foo", "bar"]] = Field(
-        ["foo", "bar"], description="Allows multiple items from a set."
+        set(["foo", "bar"]), description="Allows multiple items from a set."
     )
     single_object: OtherData = Field(
         ...,
         description="Another object embedded into this model.",
     )
     string_list: List[str] = Field(
-        ..., max_items=20, description="List of string values"
+        ..., json_schema_extra={"maxItems": 20}, description="List of string values"
     )
     int_list: List[int] = Field(..., description="List of int values")
     string_dict: Dict[str, str] = Field(
@@ -93,7 +100,9 @@ class ShowcaseModel(BaseModel):
 
 
 data = sp.pydantic_input(
-    key="my_showcase_input", model=ShowcaseModel, group_optional_fields="sidebar"
+    key="my_showcase_input",
+    model=ShowcaseModel,
+    group_optional_fields=GroupOptionalFieldsStrategy.SIDEBAR,
 )
 
 if data:

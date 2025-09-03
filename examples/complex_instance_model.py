@@ -33,7 +33,9 @@ class ExampleModel(BaseModel):
     some_datetime: datetime.datetime = Field(..., description="A datetime.")
     some_boolean: bool = False  # Option
     long_text: str = Field(
-        ..., format="multi-line", description="Unlimited text property"
+        ...,
+        description="Unlimited text property",
+        json_schema_extra={"format": "multi-line"},
     )
     integer_in_range: int = Field(
         20,
@@ -50,12 +52,14 @@ class ExampleModel(BaseModel):
         ..., description="Allows multiple items from a set."
     )
     disabled_selection: SelectionValue = Field(
-        ..., readOnly=True, description="A read only field that is shown as disabled"
+        ...,
+        description="A read only field that is shown as disabled",
+        json_schema_extra={"readOnly": True},
     )
     read_only_text: str = Field(
         "Lorem ipsum dolor sit amet",
-        description="This is a ready only text.",
-        readOnly=True,
+        description="This is a read only text.",
+        json_schema_extra={"readOnly": True},
     )
     nested_object: OtherData = Field(
         ...,
@@ -80,18 +84,17 @@ class ExampleModel(BaseModel):
     int_list: List[Annotated[int, Gt(2)]] = Field(
         ...,
         description="List of int values",
-        max_items=4,
-        min_items=2,
+    json_schema_extra={"minItems": 2, "maxItems": 4},
     )
     color_list: List[Color] = Field(
         ...,
         description="List of color values",
-        min_items=2,
+        min_length=2,
     )
     object_list: List[OtherData] = Field(
-        ...,
-        max_items=5,
-        description="A list of objects embedded into this model.",
+    ...,
+    description="A list of objects embedded into this model.",
+    json_schema_extra={"maxItems": 5},
     )
     object_dict: Dict[str, OtherData] = Field(
         ...,
@@ -113,7 +116,7 @@ instance = ExampleModel(
     some_colour=Color("green"),
     single_selection=SelectionValue.FOO,
     disabled_selection=SelectionValue.BAR,
-    multi_selection=[SelectionValue.FOO, SelectionValue.BAR],
+    multi_selection={SelectionValue.FOO, SelectionValue.BAR},
     read_only_text="INSTANCE read only text",
     nested_object=OtherData(text="nested data INSTANCE text", integer=66),
     int_dict={"key 1": 33, "key 2": 33, "key 3": 333},

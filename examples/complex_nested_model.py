@@ -19,7 +19,9 @@ class SelectionValue(str, Enum):
 
 class ExampleModel(BaseModel):
     long_text: str = Field(
-        ..., format="multi-line", description="Unlimited text property"
+        ...,
+        json_schema_extra={"format": "multi-line"},
+        description="Unlimited text property",
     )
     integer_in_range: int = Field(
         20,
@@ -36,8 +38,8 @@ class ExampleModel(BaseModel):
     )
     read_only_text: str = Field(
         "Lorem ipsum dolor sit amet",
-        description="This is a ready only text.",
-        readOnly=True,
+        description="This is a read only text.",
+        json_schema_extra={"readOnly": True},
     )
     single_object: OtherData = Field(
         ...,
