@@ -144,3 +144,17 @@ follow_imports = "skip"
 
 [tool.pytest.ini_options]
 addopts = "-s"
+
+
+[tool.pyright]
+typeCheckingMode = "standard"
+reportIncompatibleVariableOverride = "warning"
+include  = [
+    "src/**/*.py",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.404",
+    "ruff>=0.12.11",
+]

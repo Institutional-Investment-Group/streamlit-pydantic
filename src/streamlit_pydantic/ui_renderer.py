@@ -29,7 +29,7 @@ def _pydantic_encoder(obj: Any) -> Any:
         return dataclasses.asdict(obj)
 
     raise TypeError(
-        f"Object of type '{obj.__class__.__name__}' is not JSON serializable"
+        f"Object of type '{type(obj).__name__}' is not JSON serializable"
     )
 
 
@@ -585,6 +585,8 @@ class InputUI:
             data_dict = property.get("default")
         else:
             data_dict = {}
+        if data_dict is None:
+            raise ValueError("Data dictionary is None")
 
         is_object = True if property["additionalProperties"].get("$ref") else False
 
@@ -1040,6 +1042,8 @@ class InputUI:
             data_list = property.get("default")
         else:
             data_list = []
+        if data_list is None:
+            raise ValueError("Data list is None")
 
         add_col, clear_col, _ = streamlit_app.columns(3)
 
