@@ -16,4 +16,11 @@ class MySettings(sp.StreamlitSettings):
     my_cool_secrets: SubModel
 
 
-st.json(MySettings().model_dump())
+# Provide example values so the settings can be constructed in this example
+example = MySettings(
+    username="example-user",
+    password=SecretStr("hunter2"),
+    my_cool_secrets=SubModel(things_i_like=["chocolate", "python"]),
+)
+
+st.json(example.model_dump())

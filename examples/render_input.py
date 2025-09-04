@@ -9,6 +9,8 @@ class ExampleModel(BaseModel):
     some_boolean: bool = True  # Option
 
 
+from streamlit_pydantic.ui_renderer import GroupOptionalFieldsStrategy
+
 input_data = sp.pydantic_input(
-    "model_input", model=ExampleModel, group_optional_fields="sidebar"
+    "model_input", model=ExampleModel, group_optional_fields=GroupOptionalFieldsStrategy.SIDEBAR
 )

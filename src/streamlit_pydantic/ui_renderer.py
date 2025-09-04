@@ -7,10 +7,21 @@ import json
 import mimetypes
 import re
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
 
 import pandas as pd
 import streamlit as st
+from narwhals import Unknown
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic import dataclasses as pydantic_dataclasses
 from pydantic_extra_types.color import Color
@@ -57,8 +68,14 @@ def _has_output_ui_renderer(data_item: BaseModel) -> bool:
     return hasattr(data_item, "render_output_ui")
 
 
-def _has_input_ui_renderer(input_class: Type[BaseModel]) -> bool:
-    return hasattr(input_class, "render_input_ui")
+def _has_input_ui_renderer(input_class: Any) -> bool:
+    # Allow both Pydantic BaseModel and dataclass instances or types
+    if hasattr(input_class, "render_input_ui"):
+        return True
+    # For dataclass instances, check the class
+    if dataclasses.is_dataclass(input_class) and hasattr(type(input_class), "render_input_ui"):
+        return True
+    return False
 
 
 def _is_compatible_audio(mime_type: str) -> bool:
@@ -88,7 +105,7 @@ class InputUI:
     def __init__(
         self,
         key: str,
-        model: Type[BaseModel],
+        model: Union[Type[BaseModel], BaseModel, dataclasses._DataclassT, Type[dataclasses._DataclassT]],
         streamlit_container: Any = st,
         group_optional_fields: GroupOptionalFieldsStrategy = "no",  # type: ignore
         lowercase_labels: bool = False,
@@ -131,7 +148,7 @@ class InputUI:
         self._schema_references = self._input_schema.get("$defs", {})
         self._schema_required = self._input_schema.get("required", {})
 
-    def render_ui(self, key_in_expander:bool=False) -> Dict:
+    def render_ui(self, key_in_expander: bool = False) -> Dict:
         if _has_input_ui_renderer(self._input_class):
             # The input model has a rendering function
             # The rendering also returns the current state of input data
@@ -149,7 +166,7 @@ class InputUI:
         if isinstance(self._input_class, BaseModel):
             instance_dict = self._input_class.model_dump()
             instance_dict_by_alias = self._input_class.model_dump(by_alias=True)
-        elif isinstance(self._input_class.__class__, type):  # for dataclasses
+        elif dataclasses.is_dataclass(self._input_class) and not inspect.isclass(self._input_class):
             instance_dict = dict(self._input_class.__dict__)
             instance_dict_by_alias = None
         else:
@@ -231,7 +248,7 @@ class InputUI:
                         return self._input_class(**input_state)  # type: ignore
                     else:
                         # DataClass instance
-                        return self._input_class.__class__(**input_state)
+                        return self._input_class.__class__(**input_state) # pyright: ignore[reportReturnType]
                 else:
                     # BaseModel
                     return self._input_class.model_validate(input_state)  # type: ignore
@@ -1353,7 +1370,7 @@ def filter_nullable(property: Dict) -> Dict:
 
 def pydantic_input(
     key: str,
-    model: Type[BaseModel],
+    model: Union[Type[BaseModel], BaseModel, Type[dataclasses._DataclassT]],
     group_optional_fields: GroupOptionalFieldsStrategy = "no",  # type: ignore
     lowercase_labels: bool = False,
     ignore_empty_values: bool = False,
@@ -1396,26 +1413,24 @@ def pydantic_output(output_data: Any) -> None:
 
     OutputUI(output_data).render_ui()
 
-
-# Define generic type to allow autocompletion for the model fields
 T = TypeVar("T", bound=BaseModel)
-
 
 def pydantic_form(
     key: str,
-    model: Type[T],
+    model: Union[Type[T], T, dataclasses._DataclassT, Type[dataclasses._DataclassT]],
     submit_label: str = "Submit",
     clear_on_submit: bool = False,
     group_optional_fields: GroupOptionalFieldsStrategy = "no",  # type: ignore
     lowercase_labels: bool = False,
     ignore_empty_values: bool = False,
     key_in_expander: bool = False
-) -> Optional[T]:
+) -> Union[T, dataclasses._DataclassT, None]:
     """Auto-generates a Streamlit form based on the given (Pydantic-based) input class.
 
     Args:
         key (str): A string that identifies the form. Each form must have its own key.
-        model (Type[BaseModel]): The input model. Either a class or instance based on Pydantic `BaseModel` or Python `dataclass`.
+        model (Type[T] | T): The input model. Either a Pydantic model class or an instance of that class,
+            or a dataclass type/instance.
         submit_label (str): A short label explaining to the user what this button is for. Defaults to “Submit”.
         clear_on_submit (bool): If True, all widgets inside the form will be reset to their default values after the user presses the Submit button. Defaults to False.
         group_optional_fields (str, optional): If `sidebar`, optional input elements will be rendered on the sidebar.
@@ -1425,8 +1440,8 @@ def pydantic_form(
         key_in_expander (bool): If `True`, the key will be used as the label for the expander. Defaults to `False`.
 
     Returns:
-        Optional[BaseModel]: An instance of the given input class,
-            if the submit button is used and the input data passes the Pydantic validation.
+        Optional[T]: An instance of the given input class (or a newly validated instance),
+            if the submit button is used and the input data passes validation.
     """
 
     with st.form(key=key, clear_on_submit=clear_on_submit):
@@ -1440,5 +1455,6 @@ def pydantic_form(
         ).render_ui(key_in_expander=key_in_expander)
 
         if st.form_submit_button(label=submit_label):
-            return input_state  # type: ignore
+            # TODO: Validate and return the input state
+            return input_state # pyright: ignore[reportReturnType]
     return None

@@ -1,9 +1,10 @@
-import json
+from typing import Optional
 
 import streamlit as st
 from pydantic import BaseModel, Field
 
 import streamlit_pydantic as sp
+from streamlit_pydantic import GroupOptionalFieldsStrategy
 
 
 class ExampleModel(BaseModel):
@@ -16,7 +17,9 @@ class ExampleModel(BaseModel):
 
 
 data = sp.pydantic_form(
-    key="my_form", model=ExampleModel, group_optional_fields="expander"
+    key="my_form",
+    model=ExampleModel,
+    group_optional_fields=GroupOptionalFieldsStrategy.EXPANDER,
 )
 
 if data:
