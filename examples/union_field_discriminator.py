@@ -2,6 +2,7 @@ from typing import Literal, Optional, Union
 
 import streamlit as st
 from pydantic import BaseModel, Field
+from typing_extensions import Annotated
 
 import streamlit_pydantic as sp
 
@@ -18,11 +19,12 @@ class EmailAddress(BaseModel):
     email: str
     send_news: bool
 
-
 class ContactMethod(BaseModel):
-    contact: Optional[Union[PostalAddress, EmailAddress]] = Field(
-        ..., discriminator="contact_type"
-    )
+    # Use Annotated[...] with Field(discriminator=...) so Pydantic emits a
+    # discriminated-union JSON schema that the renderer understands.
+    contact: Optional[
+        Annotated[Union[PostalAddress, EmailAddress], Field(discriminator="contact_type")]
+    ] = None
     text: str
 
 

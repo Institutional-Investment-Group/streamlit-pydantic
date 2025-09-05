@@ -154,27 +154,29 @@ def is_single_object(property: Dict, references: Dict) -> bool:
 
 
 def is_union_property(property: Dict) -> bool:
-    # anyOf is used for union property prior to pydantic < 1.10
-    union_prop = property.get("anyOf")
+    # Union properties may use either `oneOf` or `anyOf` depending on Pydantic
+    # version and schema generation details. Prefer `oneOf` when present.
+    union_prop = property.get("oneOf", property.get("anyOf"))
 
     if union_prop is None:
         return False
 
-    if len(union_prop) == 0:  # type: ignore
+    if len(union_prop) == 0:
         return False
 
     discriminated = False
 
-    for reference in union_prop:  # type: ignore
-        if (
-            reference.get("oneOf") is not None
-            or reference.get("discriminated") is not None
-        ):
+    for reference in union_prop:
+        # If this reference is itself a discriminated wrapper (contains oneOf),
+        # validate its inner choices.
+        if reference.get("oneOf") is not None or reference.get("anyOf") is not None:
             discriminated = True
-            for discriminated_reference in reference.get("oneOf"):  # type: ignore
+            inner_choices = reference.get("oneOf") or reference.get("anyOf")
+            for discriminated_reference in inner_choices:
                 if not is_single_reference(discriminated_reference):
                     return False
 
+        # Otherwise, allow either a direct $ref or simple type refs
         if not discriminated and not is_single_reference(reference):
             return False
 

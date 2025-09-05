@@ -19,7 +19,7 @@ class SelectionValue(str, Enum):
 
 class ExampleModel(BaseModel):
     long_text: str = Field(
-        ...,
+        "",
         json_schema_extra={"format": "multi-line"},
         description="Unlimited text property",
     )

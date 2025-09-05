@@ -21,7 +21,6 @@ from typing import (
 
 import pandas as pd
 import streamlit as st
-from narwhals import Unknown
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic import dataclasses as pydantic_dataclasses
 from pydantic_extra_types.color import Color
@@ -96,8 +95,21 @@ class GroupOptionalFieldsStrategy(str, Enum):
     SIDEBAR = "sidebar"
 
 
-class InputUI:
-    """Input UI renderer.
+class InputUIBase:
+    """Base input UI renderer with shared behavior for concrete renderers.
+
+    Responsibilities:
+    - Manage form keys and `st.session_state` storage for rendered inputs.
+    - Provide shared rendering helpers (widget factories, collection helpers,
+        value get/store helpers).
+    - Expose a small hook contract that concrete subclasses must implement:
+        ``_get_instance_dict``, ``_get_instance_dict_by_alias``, ``_get_attribute``,
+        and ``_validate_and_return_model``.
+
+    Note:
+            This class is not intended to be used directly; use
+            ``create_input_ui`` to obtain the correct concrete implementation for a
+            Pydantic model or a dataclass (type or instance).
 
     lazydocs: ignore
     """
@@ -105,7 +117,6 @@ class InputUI:
     def __init__(
         self,
         key: str,
-        model: Union[Type[BaseModel], BaseModel, dataclasses._DataclassT, Type[dataclasses._DataclassT]],
         streamlit_container: Any = st,
         group_optional_fields: GroupOptionalFieldsStrategy = "no",  # type: ignore
         lowercase_labels: bool = False,
@@ -130,25 +141,52 @@ class InputUI:
         self._streamlit_container = streamlit_container
         self._ignore_empty_values = ignore_empty_values
 
-        if dataclasses.is_dataclass(model):
-            self._input_class = model
-            if isinstance(model, type):
-                self._type_adapter = TypeAdapter(pydantic_dataclasses.dataclass(model))
-            else:
-                self._type_adapter = TypeAdapter(
-                    pydantic_dataclasses.dataclass(model.__class__)
-                )
-            self._input_schema = self._type_adapter.json_schema()
-        else:
-            self._type_adapter = None
-            self._input_schema = model.model_json_schema(by_alias=True)
-            self._input_class = model
+        # These will be initialized in subclasses
+        self._input_class = None
+        self._type_adapter = None
+        self._input_schema = None
+        self._schema_properties = {}
+        self._schema_references = {}
+        self._schema_required = {}
 
-        self._schema_properties = self._input_schema.get("properties", {})
-        self._schema_references = self._input_schema.get("$defs", {})
-        self._schema_required = self._input_schema.get("required", {})
+    def _show_validation_errors(self, ex: ValidationError) -> None:
+        """Display validation errors in a Streamlit warning message."""
+        error_text = "**Input failed validation:**"
+        for error in ex.errors():
+            if "loc" in error and "msg" in error:
+                location = ".".join(error["loc"]).replace("__root__.", "")  # type: ignore
+                error_msg = f"**{location}:** " + error["msg"]
+                error_text += "\n\n" + error_msg
+            else:
+                # Fallback
+                error_text += "\n\n" + str(error)
+        st.warning(error_text)
+
+    def _process_schema(self):
+        """Process the schema to extract properties, references, and required fields."""
+        self._schema_properties = self._input_schema.get("properties", {}) if self._input_schema else {}
+        self._schema_references = self._input_schema.get("$defs", {}) if self._input_schema else {}
+        self._schema_required = self._input_schema.get("required", {}) if self._input_schema else {}
 
     def render_ui(self, key_in_expander: bool = False) -> Dict:
+        """Render inputs for the configured model and return current input state.
+
+        Args:
+            key_in_expander (bool): If True, render the top-level block inside
+                an expander using the configured key as title.
+
+        Returns:
+            Dict: The current input state stored in `st.session_state` for this
+                renderer. If `self._return_model` is True the method will
+                attempt to validate and return a model instance instead.
+
+        Behavior:
+            - If the target class/instance defines its own `render_input_ui`,
+              that method is called and its result is used as the persisted
+              state.
+            - Otherwise the method iterates the model JSON Schema properties
+              and renders the appropriate inputs.
+        """
         if _has_input_ui_renderer(self._input_class):
             # The input model has a rendering function
             # The rendering also returns the current state of input data
@@ -162,16 +200,9 @@ class InputUI:
 
         properties_in_expander = []
 
-        # check if the input_class is an instance and build value dicts
-        if isinstance(self._input_class, BaseModel):
-            instance_dict = self._input_class.model_dump()
-            instance_dict_by_alias = self._input_class.model_dump(by_alias=True)
-        elif dataclasses.is_dataclass(self._input_class) and not inspect.isclass(self._input_class):
-            instance_dict = dict(self._input_class.__dict__)
-            instance_dict_by_alias = None
-        else:
-            instance_dict = None
-            instance_dict_by_alias = None
+        # Implemented in subclasses
+        instance_dict = self._get_instance_dict()
+        instance_dict_by_alias = self._get_instance_dict_by_alias()
 
         for property_key in self._schema_properties.keys():
             if key_in_expander:
@@ -202,7 +233,7 @@ class InputUI:
                     property["init_value"] = instance_value
                     # keep a reference of the original class to help with non-discriminated unions
                     # TODO: This will not succeed for attributes that have an alias
-                    attr = getattr(self._input_class, property_key, None)
+                    attr = self._get_attribute(property_key)
                     if attr is not None:
                         property["instance_class"] = str(type(attr))
 
@@ -239,33 +270,1086 @@ class InputUI:
         input_state = self._session_state[self._session_input_key]
 
         if self._return_model:
-            # Validate and return a BaseModel or DataClass instance
-            try:
-                if self._type_adapter is not None:
-                    self._type_adapter.validate_python(input_state)
-                    if isinstance(self._input_class, type):
-                        # DataClass model
-                        return self._input_class(**input_state)  # type: ignore
-                    else:
-                        # DataClass instance
-                        return self._input_class.__class__(**input_state) # pyright: ignore[reportReturnType]
-                else:
-                    # BaseModel
-                    return self._input_class.model_validate(input_state)  # type: ignore
-            except ValidationError as ex:
-                error_text = "**Input failed validation:**"
-                for error in ex.errors():
-                    if "loc" in error and "msg" in error:
-                        location = ".".join(error["loc"]).replace("__root__.", "")  # type: ignore
-                        error_msg = f"**{location}:** " + error["msg"]
-                        error_text += "\n\n" + error_msg
-                    else:
-                        # Fallback
-                        error_text += "\n\n" + str(error)
-                st.warning(error_text)
-                return None  # type: ignore
+            # Validate and return model - implementation specific to model type
+            return self._validate_and_return_model(input_state)
         else:
             return input_state
+
+    def _get_instance_dict(self) -> Optional[Dict]:
+        """Get a dictionary of instance values. Implemented in subclasses."""
+        return None
+
+    def _get_instance_dict_by_alias(self) -> Optional[Dict]:
+        """Get a dictionary of instance values by alias. Implemented in subclasses."""
+        return None
+
+    def _get_attribute(self, property_key: str) -> Any:
+        """Get an attribute from the input class. Implemented in subclasses."""
+        return None
+
+    def _validate_and_return_model(self, input_state: Dict) -> Any:
+        """Validate and return a model instance. Implemented in subclasses."""
+        return input_state
+
+    # --- rendering and state helper methods (moved from legacy InputUI) ---
+    def _get_overwrite_streamlit_kwargs(self, key: str, property: Dict) -> Dict:
+        streamlit_kwargs: Dict = {}
+
+        for kwarg in property:
+            if kwarg.startswith(_OVERWRITE_STREAMLIT_KWARGS_PREFIX):
+                streamlit_kwargs[
+                    kwarg.replace(_OVERWRITE_STREAMLIT_KWARGS_PREFIX, "")
+                ] = property[kwarg]
+        return streamlit_kwargs
+
+    def _get_default_streamlit_input_kwargs(self, key: str, property: Dict) -> Dict:
+        label = property.get("title")
+        if label and self._lowercase_labels:
+            label = label.lower()
+
+        disabled = False
+        if property.get("readOnly"):
+            # Read only property -> only show value
+            disabled = True
+
+        streamlit_kwargs = {
+            "label": label,
+            "key": str(self._session_state.run_id) + "-" + str(self._key) + "-" + key,
+            "disabled": disabled,
+            # "on_change": detect_change, -> not supported for inside forms
+            # "args": (key,),
+        }
+
+        if property.get("description"):
+            streamlit_kwargs["help"] = property.get("description")
+        elif property.get("help"):
+            # Fallback to help. Used more frequently with dataclasses
+            streamlit_kwargs["help"] = property.get("help")
+
+        return streamlit_kwargs
+
+    def _is_value_ignored(self, property_key: str, value: Any) -> bool:
+        """Returns `True` if the value should be ignored for storing in session.
+
+        This is the case if `ignore_empty_values` is activated and the value is empty and not already set/changed before.
+        """
+        return (
+            self._ignore_empty_values
+            and (
+                type(value) == int or type(value) == float or isinstance(value, str)
+            )  # only for int, float or str
+            and not value
+            and self._get_value(property_key) is None
+        )
+
+    def _store_value_in_state(self, state: dict, key: str, value: Any) -> None:
+        key_elements = key.split(".")
+        for i, key_element in enumerate(key_elements):
+            if i == len(key_elements) - 1:
+                # add value to this element
+                state[key_element] = value
+                return
+            if key_element not in state:
+                state[key_element] = {}
+            state = state[key_element]
+
+    def _get_value_from_state(self, state: dict, key: str) -> Any:
+        key_elements = key.split(".")
+        for i, key_element in enumerate(key_elements):
+            if i == len(key_elements) - 1:
+                # add value to this element
+                if key_element not in state:
+                    return None
+                return state[key_element]
+            if key_element not in state:
+                state[key_element] = {}
+            state = state[key_element]
+        return None
+
+    def _store_value(self, key: str, value: Any) -> None:
+        return self._store_value_in_state(
+            self._session_state[self._session_input_key], key, value
+        )
+
+    def _get_value(self, key: str) -> Any:
+        return self._get_value_from_state(
+            self._session_state[self._session_input_key], key
+        )
+
+    def _add_button_allowed(
+        self,
+        index: int,
+        property: Dict[str, Any],
+    ) -> bool:
+        add_allowed = not (
+            (property.get("readOnly", False) is True)
+            or ((index) >= property.get("maxItems", 1000))
+        )
+
+        return add_allowed
+
+    def _remove_button_allowed(
+        self,
+        index: int,
+        property: Dict[str, Any],
+    ) -> bool:
+        remove_allowed = (property.get("readOnly") is True) or (
+            (index + 1) <= property.get("minItems", 0)
+        )
+
+        return remove_allowed
+
+    def _clear_button_allowed(
+        self,
+        property: Dict[str, Any],
+    ) -> bool:
+        clear_allowed = not (
+            (property.get("readOnly", False) is True)
+            or (property.get("minItems", 0) > 0)
+        )
+
+        return clear_allowed
+
+    def _render_list_add_button(
+        self,
+        key: str,
+        streamlit_app: Any,
+        data_list: List[Any],
+    ) -> List[Any]:
+        if streamlit_app.button(
+            "Add Item",
+            key=self._key + "-" + key + "list-add-item",
+        ):
+            data_list.append(None)
+
+        return data_list
+
+    def _render_list_clear_button(
+        self,
+        key: str,
+        streamlit_app: Any,
+        data_list: List[Any],
+    ) -> List[Any]:
+        if streamlit_app.button(
+            "Clear All",
+            key=self._key + "_" + key + "-list_clear-all",
+        ):
+            data_list = []
+
+        return data_list
+
+    def _render_dict_add_button(
+        self, key: str, streamlit_app: Any, data_dict: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if streamlit_app.button(
+            "Add Item",
+            key=self._key + "-" + key + "-add-item",
+        ):
+            data_dict[str(len(data_dict) + 1)] = None
+
+        return data_dict
+
+    def _render_dict_clear_button(
+        self,
+        key: str,
+        streamlit_app: Any,
+        data_dict: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if streamlit_app.button(
+            "Clear All",
+            key=self._key + "-" + key + "-clear-all",
+        ):
+            data_dict = {}
+
+        return data_dict
+
+    def _render_single_datetime_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        streamlit_kwargs = self._get_default_streamlit_input_kwargs(key, property)
+        overwrite_kwargs = self._get_overwrite_streamlit_kwargs(key, property)
+
+        if property.get("format") == "time":
+            if property.get("init_value"):
+                streamlit_kwargs["value"] = property.get("init_value")
+            elif property.get("default"):
+                with contextlib.suppress(Exception):
+                    streamlit_kwargs["value"] = datetime.time.fromisoformat(  # type: ignore
+                        property["default"]
+                    )
+            return streamlit_app.time_input(**{**streamlit_kwargs, **overwrite_kwargs})
+        elif property.get("format") == "date":
+            if property.get("init_value"):
+                streamlit_kwargs["value"] = property.get("init_value")
+            elif property.get("default"):
+                with contextlib.suppress(Exception):
+                    streamlit_kwargs["value"] = datetime.date.fromisoformat(  # type: ignore
+                        property["default"]
+                    )
+            return streamlit_app.date_input(**{**streamlit_kwargs, **overwrite_kwargs})
+        elif property.get("format") == "date-time":
+            if property.get("init_value"):
+                streamlit_kwargs["value"] = property.get("init_value")
+            elif property.get("default"):
+                with contextlib.suppress(Exception):
+                    streamlit_kwargs["value"] = datetime.datetime.fromisoformat(  # type: ignore
+                        property["default"]
+                    )
+            with self._streamlit_container.container():
+                if not property.get("is_item"):
+                    self._streamlit_container.subheader(streamlit_kwargs.get("label"))
+                if streamlit_kwargs.get("description"):
+                    self._streamlit_container.text(streamlit_kwargs.get("description"))
+                selected_date = None
+                selected_time = None
+
+                # columns can not be used within a collection
+                if property.get("is_item"):
+                    date_col = self._streamlit_container.container()
+                    time_col = self._streamlit_container.container()
+                else:
+                    date_col, time_col = self._streamlit_container.columns(2)
+                with date_col:
+                    date_kwargs = {**{**streamlit_kwargs, **overwrite_kwargs}}
+                    date_kwargs["label"] = "Date"
+                    date_kwargs["key"] = (f"{streamlit_kwargs.get('key')}-date-input",)
+
+                    value = streamlit_kwargs.get("value")
+                    if value:
+                        with contextlib.suppress(Exception):
+                            date_kwargs["value"] = value.date()
+                    selected_date = self._streamlit_container.date_input(**date_kwargs)
+
+                with time_col:
+                    time_kwargs = {**{**streamlit_kwargs, **overwrite_kwargs}}
+                    time_kwargs["label"] = "Time"
+                    time_kwargs["key"] = f"{streamlit_kwargs.get('key')}-time-input"
+
+                    value = streamlit_kwargs.get("value")
+                    if value:
+                        with contextlib.suppress(Exception):
+                            time_kwargs["value"] = value.time()
+                    selected_time = self._streamlit_container.time_input(**time_kwargs)
+
+                return datetime.datetime.combine(selected_date, selected_time)
+        else:
+            streamlit_app.warning(
+                "Date format is not supported: " + str(property.get("format"))
+            )
+
+    def _render_single_file_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        streamlit_kwargs = self._get_default_streamlit_input_kwargs(key, property)
+        overwrite_kwargs = self._get_overwrite_streamlit_kwargs(key, property)
+
+        file_extension = None
+        if "mime_type" in property:
+            file_extension = mimetypes.guess_extension(property["mime_type"])
+
+        uploaded_file = streamlit_app.file_uploader(
+            **{
+                **streamlit_kwargs,
+                "accept_multiple_files": False,
+                "type": file_extension,
+                **overwrite_kwargs,
+            }
+        )
+        if uploaded_file is None:
+            return b""
+
+        file_bytes = uploaded_file.getvalue()
+        if getattr(uploaded_file, "type"):
+            if _is_compatible_audio(uploaded_file.type):
+                # Show audio
+                streamlit_app.audio(file_bytes, format=uploaded_file.type)
+            if _is_compatible_image(uploaded_file.type):
+                # Show image
+                streamlit_app.image(file_bytes)
+            if _is_compatible_video(uploaded_file.type):
+                # Show video
+                streamlit_app.video(file_bytes, format=uploaded_file.type)
+        return base64.urlsafe_b64encode(file_bytes)
+
+    def _render_single_string_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        streamlit_kwargs = self._get_default_streamlit_input_kwargs(key, property)
+        overwrite_kwargs = self._get_overwrite_streamlit_kwargs(key, property)
+        if property.get("init_value"):
+            streamlit_kwargs["value"] = property.get("init_value")
+        elif property.get("default"):
+            streamlit_kwargs["value"] = property.get("default")
+        elif property.get("example"):
+            # TODO: also use example for other property types
+            # Use example as value if it is provided
+            streamlit_kwargs["value"] = property.get("example")
+        else:
+            streamlit_kwargs["value"] = property.get("default")
+
+        if property.get("maxLength") is not None:
+            streamlit_kwargs["max_chars"] = property.get("maxLength")
+
+        if property.get("readOnly"):
+            # Read only property -> only show value
+            streamlit_kwargs["disabled"] = property.get("readOnly", False)
+
+        if property.get("format") == "multi-line" and not property.get("writeOnly"):
+            # Use text area if format is multi-line (custom definition)
+            return streamlit_app.text_area(**{**streamlit_kwargs, **overwrite_kwargs})
+        else:
+            # Use text input for most situations
+            if property.get("writeOnly"):
+                streamlit_kwargs["type"] = "password"
+            if streamlit_kwargs.get("value") is None:
+                streamlit_kwargs["value"] = ''
+            value = streamlit_app.text_input(**{**streamlit_kwargs, **overwrite_kwargs})
+            return value
+
+    def _render_single_color_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        streamlit_kwargs = self._get_default_streamlit_input_kwargs(key, property)
+        overwrite_kwargs = self._get_overwrite_streamlit_kwargs(key, property)
+        if property.get("init_value") is not None:
+            streamlit_kwargs["value"] = property["init_value"]
+        elif property.get("default") is not None:
+            streamlit_kwargs["value"] = property["default"]
+        elif property.get("example") is not None:
+            streamlit_kwargs["value"] = property["example"]
+
+        if isinstance(streamlit_kwargs.get("value"), Color):
+            streamlit_kwargs["value"] = streamlit_kwargs["value"].as_hex()
+        elif isinstance(streamlit_kwargs.get("value"), str):
+            streamlit_kwargs["value"] = Color(streamlit_kwargs["value"]).as_hex()
+
+        if property.get("format") == "text":
+            # Use text input if specified format is text
+            return streamlit_app.text_input(**{**streamlit_kwargs, **overwrite_kwargs})
+        else:
+            # Use color picker input for most situations
+            return streamlit_app.color_picker(
+                **{**streamlit_kwargs, **overwrite_kwargs}
+            )
+
+    def _render_multi_enum_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        streamlit_kwargs = self._get_default_streamlit_input_kwargs(key, property)
+        overwrite_kwargs = self._get_overwrite_streamlit_kwargs(key, property)
+
+        select_options: List[str] = []
+        if property.get("items").get("enum"):  # type: ignore
+            # Using Literal
+            select_options = property.get("items").get("enum")  # type: ignore
+        else:
+            # Using Enum
+            reference_item = schema_utils.resolve_reference(
+                property["items"]["$ref"], self._schema_references
+            )
+            select_options = reference_item["enum"]
+
+        if property.get("init_value"):
+            streamlit_kwargs["default"] = property.get("init_value")
+        elif property.get("default"):
+            try:
+                streamlit_kwargs["default"] = property.get("default")
+            except Exception:
+                pass
+
+        return streamlit_app.multiselect(
+            **{**streamlit_kwargs, "options": select_options, **overwrite_kwargs}
+        )
+
+    def _render_single_enum_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        streamlit_kwargs = self._get_default_streamlit_input_kwargs(key, property)
+        overwrite_kwargs = self._get_overwrite_streamlit_kwargs(key, property)
+
+        select_options: List[str] = []
+        if property.get("enum"):
+            select_options = property.get("enum")  # type: ignore
+        else:
+            reference_item = schema_utils.get_single_reference_item(
+                property, self._schema_references
+            )
+            select_options = reference_item["enum"]
+
+        if property.get("init_value"):
+            streamlit_kwargs["index"] = select_options.index(
+                property.get("init_value")  # type: ignore
+            )
+        elif property.get("default") is not None:
+            try:
+                streamlit_kwargs["index"] = select_options.index(
+                    property.get("default")  # type: ignore
+                )
+            except Exception:
+                # Use default selection
+                pass
+
+        # if there is only one option then there is no choice for the user to be make
+        # so simply return the value (This is relevant for discriminator properties)
+        if len(select_options) == 1:
+            return select_options[0]
+        else:
+            return streamlit_app.selectbox(
+                **{**streamlit_kwargs, "options": select_options, **overwrite_kwargs}
+            )
+
+    def _render_single_dict_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        # Add title and subheader
+        streamlit_app.subheader(property.get("title"))
+        if property.get("description"):
+            streamlit_app.markdown(property.get("description"))
+
+        if self._get_value(key) is not None or self._get_value(key) == {}:
+            data_dict = self._get_value(key)
+        elif property.get("init_value"):
+            data_dict = property.get("init_value")
+        elif property.get("default"):
+            data_dict = property.get("default")
+        else:
+            data_dict = {}
+        if data_dict is None:
+            raise ValueError("Data dictionary is None")
+
+        is_object = True if property["additionalProperties"].get("$ref") else False
+
+        add_col, clear_col, _ = streamlit_app.columns(3)
+
+        add_col = add_col.empty()
+
+        if self._clear_button_allowed(property):
+            data_dict = self._render_dict_add_button(key, add_col, data_dict)
+
+        if self._clear_button_allowed(property):
+            data_dict = self._render_dict_clear_button(key, clear_col, data_dict)
+
+        new_dict = {}
+
+        for index, input_item in enumerate(data_dict.items()):
+            updated_key, updated_value = self._render_dict_item(
+                streamlit_app,
+                key,
+                input_item,
+                index,
+                property,
+            )
+
+            if updated_key is not None and updated_value is not None:
+                new_dict[updated_key] = updated_value
+
+            if is_object:
+                streamlit_app.markdown("---")
+
+        if not is_object:
+            streamlit_app.markdown("---")
+
+        return new_dict
+
+    def _render_single_reference(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        reference_item = schema_utils.get_single_reference_item(
+            property, self._schema_references
+        )
+        return self._render_property(streamlit_app, key, reference_item)
+
+    def _render_union_property(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        streamlit_kwargs = self._get_default_streamlit_input_kwargs(key, property)
+
+        reference_items = schema_utils.get_union_references(
+            property, self._schema_references
+        )
+
+        # special handling when there are instance values and a discriminator property
+        # to differentiate between object types
+        if property.get("init_value") and property.get("discriminator"):
+            disc_prop = property["discriminator"]["propertyName"]
+            # find the index where the discriminator is equal to the init_value
+            ref_index = next(
+                i
+                for i, x in enumerate(reference_items)
+                if x["properties"][disc_prop]["enum"]
+                == [property["init_value"][disc_prop]]
+            )
+
+            # add any init_value properties to the corresponding reference item
+            reference_items[ref_index]["init_value"] = property["init_value"]
+            streamlit_kwargs["index"] = ref_index
+        elif property.get("init_value") and property.get("instance_class"):
+            ref_index = next(
+                i
+                for i, x in enumerate(reference_items)
+                if x["title"] in property["instance_class"]
+            )
+            reference_items[ref_index]["init_value"] = property["init_value"]
+            streamlit_kwargs["index"] = ref_index
+
+        name_reference_mapping: Dict[str, Dict] = {}
+
+        for reference in reference_items:
+            reference_title = _name_to_title(reference["title"])
+            name_reference_mapping[reference_title] = reference
+
+        streamlit_app.subheader(streamlit_kwargs["label"])  # type: ignore
+        if "help" in streamlit_kwargs:
+            streamlit_app.markdown(streamlit_kwargs["help"])
+
+        selected_reference = streamlit_app.selectbox(
+            **{
+                **streamlit_kwargs,
+                "label": streamlit_kwargs["label"] + " - Options",
+                "options": name_reference_mapping.keys(),
+            }
+        )
+
+        input_data = self._render_object_input(
+            streamlit_app, key, name_reference_mapping[selected_reference]
+        )
+
+        streamlit_app.markdown("---")
+        return input_data
+
+    def _render_multi_file_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        streamlit_kwargs = self._get_default_streamlit_input_kwargs(key, property)
+        overwrite_kwargs = self._get_overwrite_streamlit_kwargs(key, property)
+
+        file_extension = None
+        if "mime_type" in property:
+            file_extension = mimetypes.guess_extension(property["mime_type"])
+
+        uploaded_files = streamlit_app.file_uploader(
+            **{
+                **streamlit_kwargs,
+                "accept_multiple_files": True,
+                "type": file_extension,
+                **overwrite_kwargs,
+            }
+        )
+        uploaded_files_bytes = []
+        if uploaded_files:
+            for uploaded_file in uploaded_files:
+                uploaded_files_bytes.append(uploaded_file.read())
+        return uploaded_files_bytes
+
+    def _render_single_boolean_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        streamlit_kwargs = self._get_default_streamlit_input_kwargs(key, property)
+        overwrite_kwargs = self._get_overwrite_streamlit_kwargs(key, property)
+
+        if "init_value" in property:
+            streamlit_kwargs["value"] = property.get("init_value")
+        elif "default" in property:
+            streamlit_kwargs["value"] = property.get("default")
+
+        # special formatting when rendering within a list/dict
+        if property.get("is_item"):
+            streamlit_app.markdown("##")
+
+        return streamlit_app.checkbox(**{**streamlit_kwargs, **overwrite_kwargs})
+
+    def _render_single_number_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        streamlit_kwargs = self._get_default_streamlit_input_kwargs(key, property)
+        overwrite_kwargs = self._get_overwrite_streamlit_kwargs(key, property)
+
+        number_transform = int
+        if property.get("type") == "number":
+            number_transform = float  # type: ignore
+            streamlit_kwargs["format"] = "%f"
+
+        if "multipleOf" in property:
+            # Set stepcount based on multiple of parameter
+            streamlit_kwargs["step"] = number_transform(property["multipleOf"])
+        elif number_transform == int:
+            # Set step size to 1 as default
+            streamlit_kwargs["step"] = 1
+        elif number_transform == float:
+            # Set step size to 0.01 as default
+            # TODO: adapt to default value
+            streamlit_kwargs["step"] = 0.01
+
+        if "minimum" in property:
+            streamlit_kwargs["min_value"] = number_transform(property["minimum"])
+        if "exclusiveMinimum" in property:
+            streamlit_kwargs["min_value"] = number_transform(
+                property["exclusiveMinimum"] + streamlit_kwargs["step"]
+            )
+        if "maximum" in property:
+            streamlit_kwargs["max_value"] = number_transform(property["maximum"])
+
+        if "exclusiveMaximum" in property:
+            streamlit_kwargs["max_value"] = number_transform(
+                property["exclusiveMaximum"] - streamlit_kwargs["step"]
+            )
+
+        if self._session_state.get(streamlit_kwargs["key"]) is None:
+            if property.get("init_value") is not None:
+                streamlit_kwargs["value"] = number_transform(property["init_value"])
+            elif property.get("default") is not None:
+                streamlit_kwargs["value"] = number_transform(property["default"])  # type: ignore
+            else:
+                if "min_value" in streamlit_kwargs:
+                    streamlit_kwargs["value"] = streamlit_kwargs["min_value"]
+                elif number_transform == int:
+                    streamlit_kwargs["value"] = 0
+                else:
+                    # Set default value to step
+                    streamlit_kwargs["value"] = number_transform(
+                        streamlit_kwargs["step"]
+                    )
+        else:
+            streamlit_kwargs["value"] = number_transform(
+                self._session_state[streamlit_kwargs["key"]]
+            )
+
+        if "min_value" in streamlit_kwargs and "max_value" in streamlit_kwargs:
+            # TODO: Only if less than X steps
+            return streamlit_app.slider(**{**streamlit_kwargs, **overwrite_kwargs})
+        else:
+            return streamlit_app.number_input(
+                **{**streamlit_kwargs, **overwrite_kwargs}
+            )
+
+    def _render_object_input(self, streamlit_app: Any, key: str, property: Dict) -> Any:
+        properties = property["properties"]
+        object_inputs = {}
+        for property_key in properties:
+            new_property = properties[property_key]
+            if not new_property.get("title"):
+                # Set property key as fallback title
+                new_property["title"] = _name_to_title(property_key)
+            # construct full key based on key parts -> required later to get the value
+            full_key = key + "." + property_key
+
+            if property.get("init_value"):
+                new_property["init_value"] = property["init_value"].get(property_key)
+            if property.get("default"):
+                new_property["default"] = property["default"].get(property_key)
+
+            new_property["readOnly"] = new_property.get("readOnly", False)
+
+            value = self._render_property(streamlit_app, full_key, new_property)
+            if not self._is_value_ignored(property_key, value):
+                object_inputs[property_key] = value
+
+        return object_inputs
+
+    def _render_single_object_input(
+        self, streamlit_app: Any, key: str, property: Dict
+    ) -> Any:
+        # Add title and subheader
+        title = property.get("title")
+        if property.get("is_item"):
+            streamlit_app.caption(title)
+        else:
+            streamlit_app.subheader(title)
+        if property.get("description"):
+            streamlit_app.markdown(property.get("description"))
+
+        object_reference = schema_utils.get_single_reference_item(
+            property, self._schema_references
+        )
+
+        object_reference["init_value"] = property.get("init_value", None)
+
+        object_reference["default"] = property.get("default", None)
+
+        object_reference["readOnly"] = property.get("readOnly", None)
+
+        return self._render_object_input(streamlit_app, key, object_reference)
+
+    def _render_list_item(
+        self,
+        streamlit_app: Any,
+        parent_key: str,
+        value: Any,
+        index: int,
+        property: Dict[str, Any],
+    ) -> Any:
+        label = "Item #" + str(index + 1)
+        new_key = self._key + "-" + parent_key + "." + str(index)
+        item_placeholder = streamlit_app.empty()
+
+        with item_placeholder:
+            input_col, button_col = streamlit_app.columns([8, 3])
+
+            button_col.markdown("##")
+
+            if self._remove_button_allowed(index, property):
+                remove = False
+            else:
+                remove = button_col.button("Remove", key=new_key + "-remove")
+
+            #  insert an input field when the remove button has not been clicked
+            if not remove:
+                with input_col:
+                    new_property = {
+                        "title": label,
+                        "init_value": value if value else None,
+                        "is_item": True,
+                        "readOnly": property.get("readOnly"),
+                        **property["items"],
+                    }
+                    return self._render_property(streamlit_app, new_key, new_property)
+
+            else:
+                # when the remove button is clicked clear the placeholder and return None
+                item_placeholder.empty()
+                return None
+
+    def _render_dict_item(
+        self,
+        streamlit_app: Any,
+        parent_key: str,
+        in_value: Tuple[str, Any],
+        index: int,
+        property: Dict[str, Any],
+    ) -> Any:
+        new_key = self._key + "-" + parent_key + "." + str(index)
+        item_placeholder = streamlit_app.empty()
+
+        with item_placeholder.container():
+            key_col, value_col, button_col = streamlit_app.columns([4, 4, 3])
+
+            dict_key = in_value[0]
+            dict_value = in_value[1]
+
+            dict_key_key = new_key + "-key"
+            dict_value_key = new_key + "-value"
+
+            button_col.markdown("##")
+
+            if self._remove_button_allowed(index, property):
+                remove = False
+            else:
+                remove = button_col.button("Remove", key=new_key + "-remove")
+
+            if not remove:
+                with key_col:
+                    updated_key = streamlit_app.text_input(
+                        "Key",
+                        value=dict_key,
+                        key=dict_key_key,
+                        disabled=property.get("readOnly", False),
+                    )
+
+                with value_col:
+                    new_property = {
+                        "title": "Value",
+                        "init_value": dict_value,
+                        "is_item": True,
+                        "readOnly": property.get("readOnly"),
+                        **property["additionalProperties"],
+                    }
+                    with value_col:
+                        updated_value = self._render_property(
+                            streamlit_app, dict_value_key, new_property
+                        )
+
+                    return updated_key, updated_value
+
+            else:
+                # when the remove button is clicked clear the placeholder and return None
+                item_placeholder.empty()
+                return None, None
+
+    def _render_list_input(self, streamlit_app: Any, key: str, property: Dict) -> Any:
+        # Add title and subheader
+        streamlit_app.subheader(property.get("title"))
+        if property.get("description"):
+            streamlit_app.markdown(property.get("description"))
+
+        is_object = True if property["items"].get("$ref") else False
+
+        object_list = []
+
+        # Treat empty list as a session data "hit"
+        if self._get_value(key) is not None or self._get_value(key) == []:
+            data_list = self._get_value(key)
+        elif property.get("init_value"):
+            data_list = property.get("init_value")
+        elif property.get("default"):
+            data_list = property.get("default")
+        else:
+            data_list = []
+        if data_list is None:
+            raise ValueError("Data list is None")
+
+        add_col, clear_col, _ = streamlit_app.columns(3)
+
+        add_col = add_col.empty()
+
+        self._render_list_add_button(key, add_col, data_list)
+
+        if self._clear_button_allowed(property):
+            data_list = self._render_list_clear_button(key, clear_col, data_list)
+
+        if len(data_list) > 0:
+            for index, item in enumerate(data_list):
+                output = self._render_list_item(
+                    streamlit_app,
+                    key,
+                    item,
+                    index,
+                    property,
+                )
+                if output is not None:
+                    object_list.append(output)
+
+                if is_object:
+                    streamlit_app.markdown("---")
+
+            if not self._add_button_allowed(len(object_list), property):
+                add_col = add_col.empty()
+
+            if not is_object:
+                streamlit_app.markdown("---")
+
+        return object_list
+
+    def _render_property(self, streamlit_app: Any, key: str, property: Dict) -> Any:
+        # filter the case of optional and nullable
+        property = schema_utils.filter_nullable(property)
+        if schema_utils.is_single_enum_property(property, self._schema_references):
+            return self._render_single_enum_input(streamlit_app, key, property)
+
+        if schema_utils.is_multi_enum_property(property, self._schema_references):
+            return self._render_multi_enum_input(streamlit_app, key, property)
+
+        if schema_utils.is_single_file_property(property):
+            return self._render_single_file_input(streamlit_app, key, property)
+
+        if schema_utils.is_multi_file_property(property):
+            return self._render_multi_file_input(streamlit_app, key, property)
+
+        if schema_utils.is_single_datetime_property(property):
+            return self._render_single_datetime_input(streamlit_app, key, property)
+
+        if schema_utils.is_single_color_property(property):
+            return self._render_single_color_input(streamlit_app, key, property)
+
+        if schema_utils.is_single_boolean_property(property):
+            return self._render_single_boolean_input(streamlit_app, key, property)
+
+        if schema_utils.is_single_dict_property(property):
+            return self._render_single_dict_input(streamlit_app, key, property)
+
+        if schema_utils.is_single_number_property(property):
+            return self._render_single_number_input(streamlit_app, key, property)
+
+        if schema_utils.is_single_string_property(property):
+            return self._render_single_string_input(streamlit_app, key, property)
+
+        if schema_utils.is_single_object(property, self._schema_references):
+            return self._render_single_object_input(streamlit_app, key, property)
+
+        if schema_utils.is_object_list_property(property, self._schema_references, key, self._schema_properties):
+            return self._render_list_input(streamlit_app, key, property)
+
+        if schema_utils.is_property_list(property):
+            return self._render_list_input(streamlit_app, key, property)
+
+        if schema_utils.is_single_reference(property):
+            return self._render_single_reference(streamlit_app, key, property)
+
+        if schema_utils.is_union_property(property):
+            return self._render_union_property(streamlit_app, key, property)
+        streamlit_app.warning(
+            "The type of the following property is currently not supported: "
+            + str(property.get("title"))
+        )
+        raise Exception("Unsupported property")
+
+
+class InputUIModelType(InputUIBase):
+    """Input UI renderer for BaseModel types."""
+
+    def __init__(
+        self,
+        key: str,
+        model_type: Type[BaseModel],
+        **kwargs
+    ):
+        super().__init__(key, **kwargs)
+        self._input_class = model_type
+        self._type_adapter = None
+        self._input_schema = model_type.model_json_schema(by_alias=True)
+        self._process_schema()
+
+    def _get_instance_dict(self) -> Optional[Dict]:
+        return None
+
+    def _get_instance_dict_by_alias(self) -> Optional[Dict]:
+        return None
+
+    def _get_attribute(self, property_key: str) -> Any:
+        return None
+
+    def _validate_and_return_model(self, input_state: Dict) -> Any:
+        try:
+            return self._input_class.model_validate(input_state)
+        except ValidationError as ex:
+            self._show_validation_errors(ex)
+            return None
+
+
+class InputUIModelInstance(InputUIBase):
+    """Input UI renderer for BaseModel instances."""
+
+    def __init__(
+        self,
+        key: str,
+        model_instance: BaseModel,
+        **kwargs
+    ):
+        super().__init__(key, **kwargs)
+        self._input_class = model_instance
+        self._type_adapter = None
+        self._input_schema = model_instance.model_json_schema(by_alias=True)
+        self._process_schema()
+
+    def _get_instance_dict(self) -> Dict:
+        return self._input_class.model_dump()
+
+    def _get_instance_dict_by_alias(self) -> Dict:
+        return self._input_class.model_dump(by_alias=True)
+
+    def _get_attribute(self, property_key: str) -> Any:
+        return getattr(self._input_class, property_key, None)
+
+    def _validate_and_return_model(self, input_state: Dict) -> Any:
+        try:
+            return self._input_class.model_validate(input_state)
+        except ValidationError as ex:
+            self._show_validation_errors(ex)
+            return None
+
+
+class InputUIDataclassType(InputUIBase):
+    """Input UI renderer for dataclass types."""
+
+    def __init__(
+        self,
+        key: str,
+        dataclass_type: Type[Any],
+        **kwargs
+    ):
+        super().__init__(key, **kwargs)
+        self._input_class = dataclass_type
+        self._type_adapter = TypeAdapter(pydantic_dataclasses.dataclass(dataclass_type))
+        self._input_schema = self._type_adapter.json_schema()
+        self._process_schema()
+
+    def _get_instance_dict(self) -> Optional[Dict]:
+        return None
+
+    def _get_instance_dict_by_alias(self) -> Optional[Dict]:
+        return None
+
+    def _get_attribute(self, property_key: str) -> Any:
+        return None
+
+    def _validate_and_return_model(self, input_state: Dict) -> Any:
+        try:
+            self._type_adapter.validate_python(input_state)
+            return self._input_class(**input_state)  # type: ignore
+        except ValidationError as ex:
+            self._show_validation_errors(ex)
+            return None
+
+
+class InputUIDataclassInstance(InputUIBase):
+    """Input UI renderer for dataclass instances."""
+
+    def __init__(
+        self,
+        key: str,
+        dataclass_instance: Any,
+        **kwargs
+    ):
+        super().__init__(key, **kwargs)
+        self._input_class = dataclass_instance
+        self._type_adapter = TypeAdapter(
+            pydantic_dataclasses.dataclass(dataclass_instance.__class__)
+        )
+        self._input_schema = self._type_adapter.json_schema()
+        self._process_schema()
+
+    def _get_instance_dict(self) -> Dict:
+        return dict(self._input_class.__dict__)
+
+    def _get_instance_dict_by_alias(self) -> Optional[Dict]:
+        return None
+
+    def _get_attribute(self, property_key: str) -> Any:
+        return getattr(self._input_class, property_key, None)
+
+    def _validate_and_return_model(self, input_state: Dict) -> Any:
+        try:
+            self._type_adapter.validate_python(input_state)
+            return self._input_class.__class__(**input_state) # pyright: ignore[reportReturnType]
+        except ValidationError as ex:
+            self._show_validation_errors(ex)
+            return None
+
+
+# Factory function to create the appropriate InputUI class
+def create_input_ui(
+    key: str,
+    model: Union[Type[BaseModel], BaseModel, Any, Type[Any]],
+    **kwargs
+) -> InputUIBase:
+    """Factory function to create the appropriate InputUI class based on the model type."""
+    if dataclasses.is_dataclass(model):
+        if isinstance(model, type):
+            return InputUIDataclassType(key, model, **kwargs)
+        else:
+            return InputUIDataclassInstance(key, model, **kwargs)
+    else:
+        if isinstance(model, type):
+            return InputUIModelType(key, model, **kwargs)
+        else:
+            return InputUIModelInstance(key, model, **kwargs)
+
+
+# For backward compatibility and existing references
+class InputUI(InputUIBase):
+    """Legacy InputUI renderer (kept for backward compatibility).
+
+    lazydocs: ignore
+    """
+
+    def __init__(
+        self,
+        key: str,
+        model: Union[Type[BaseModel], BaseModel, Any, Type[Any]],
+        **kwargs
+    ):
+        super().__init__(key, **kwargs)
+
+        # Delegate to the appropriate implementation
+        self._delegate = create_input_ui(key, model, **kwargs)
+        self._input_class = self._delegate._input_class
+        self._type_adapter = self._delegate._type_adapter
+        self._input_schema = self._delegate._input_schema
+        self._schema_properties = self._delegate._schema_properties
+        self._schema_references = self._delegate._schema_references
+        self._schema_required = self._delegate._schema_required
+
+    def render_ui(self, key_in_expander: bool = False) -> Dict:
+        return self._delegate.render_ui(key_in_expander)
 
     def _get_overwrite_streamlit_kwargs(self, key: str, property: Dict) -> Dict:
         streamlit_kwargs: Dict = {}
@@ -1370,7 +2454,7 @@ def filter_nullable(property: Dict) -> Dict:
 
 def pydantic_input(
     key: str,
-    model: Union[Type[BaseModel], BaseModel, Type[dataclasses._DataclassT]],
+    model: Union[Type[BaseModel], BaseModel, Type[Any]],
     group_optional_fields: GroupOptionalFieldsStrategy = "no",  # type: ignore
     lowercase_labels: bool = False,
     ignore_empty_values: bool = False,
@@ -1393,11 +2477,11 @@ def pydantic_input(
     Returns:
         Dict: A dictionary with the current state of the input data.
     """
-    return InputUI(
+    return create_input_ui(
         key,
         model,
         group_optional_fields=group_optional_fields,
-        streamlit_container= streamlit_container,
+        streamlit_container=streamlit_container,
         lowercase_labels=lowercase_labels,
         ignore_empty_values=ignore_empty_values,
         return_model=False,
@@ -1417,14 +2501,14 @@ T = TypeVar("T", bound=BaseModel)
 
 def pydantic_form(
     key: str,
-    model: Union[Type[T], T, dataclasses._DataclassT, Type[dataclasses._DataclassT]],
+    model: Union[Type[T], T, Any, Type[Any]],
     submit_label: str = "Submit",
     clear_on_submit: bool = False,
     group_optional_fields: GroupOptionalFieldsStrategy = "no",  # type: ignore
     lowercase_labels: bool = False,
     ignore_empty_values: bool = False,
     key_in_expander: bool = False
-) -> Union[T, dataclasses._DataclassT, None]:
+) -> Union[T, Any, None]:
     """Auto-generates a Streamlit form based on the given (Pydantic-based) input class.
 
     Args:
@@ -1445,7 +2529,7 @@ def pydantic_form(
     """
 
     with st.form(key=key, clear_on_submit=clear_on_submit):
-        input_state = InputUI(
+        input_state = create_input_ui(
             key,
             model,
             group_optional_fields=group_optional_fields,
@@ -1455,6 +2539,6 @@ def pydantic_form(
         ).render_ui(key_in_expander=key_in_expander)
 
         if st.form_submit_button(label=submit_label):
-            # TODO: Validate and return the input state
+            # Return the validated model instance
             return input_state # pyright: ignore[reportReturnType]
     return None
